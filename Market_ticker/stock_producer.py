@@ -1,0 +1,721 @@
+import os
+import json
+import time
+import warnings
+import threading
+from datetime import datetime, timezone
+import requests
+import truststore
+from kafka import KafkaProducer
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+truststore.inject_into_ssl()
+
+warnings.filterwarnings("ignore")
+
+API_KEY = os.getenv("INDIANAPI_KEY", "").strip()
+
+INDIANAPI_URL = "https://stock.indianapi.in/stock"
+
+YAHOO_URL = (
+    "https://query1.finance.yahoo.com/v8/finance/chart/"
+)
+
+ET_COMPANY_URL = (
+    "https://marketservices.indiatimes.com/marketservices/company"
+)
+
+
+# ============================================================
+# FINAL STOCK MASTER - 13 STOCKS
+# ============================================================
+
+STOCKS = {
+    "RELIANCE": {
+        "name": "Reliance Industries",
+        "yahoo_symbol": "RELIANCE.NS"
+    },
+    "TCS": {
+        "name": "Tata Consultancy Services",
+        "yahoo_symbol": "TCS.NS"
+    },
+    "INFY": {
+        "name": "Infosys",
+        "yahoo_symbol": "INFY.NS"
+    },
+    "HDFCBANK": {
+        "name": "HDFC Bank",
+        "yahoo_symbol": "HDFCBANK.NS"
+    },
+    "ICICIBANK": {
+        "name": "ICICI Bank",
+        "yahoo_symbol": "ICICIBANK.NS"
+    },
+    "TATASTEEL": {
+        "name": "Tata Steel",
+        "yahoo_symbol": "TATASTEEL.NS"
+    },
+    "SBIN": {
+        "name": "State Bank of India",
+        "yahoo_symbol": "SBIN.NS"
+    },
+    "ITC": {
+        "name": "ITC",
+        "yahoo_symbol": "ITC.NS"
+    },
+    "SUNPHARMA": {
+        "name": "Sun Pharmaceutical",
+        "yahoo_symbol": "SUNPHARMA.NS"
+    },
+    "BHARTIARTL": {
+        "name": "Bharti Airtel",
+        "yahoo_symbol": "BHARTIARTL.NS"
+    },
+    "ADANIENT": {
+        "name": "Adani Enterprises",
+        "yahoo_symbol": "ADANIENT.NS"
+    },
+    "COALINDIA": {
+        "name": "Coal India",
+        "yahoo_symbol": "COALINDIA.NS"
+    },
+    "BAJFINANCE": {
+        "name": "Bajaj Finance",
+        "yahoo_symbol": "BAJFINANCE.NS"
+    }
+}
+
+
+# ============================================================
+# ECONOMIC TIMES COMPANY IDS
+# Existing mappings retained from your implementation.
+# Additional IDs must be verified before adding.
+# ============================================================
+
+ET_COMPANY_IDS = {
+    "RELIANCE": "13215",
+    "TCS": "8345",
+    "INFY": "10960",
+    "HDFCBANK": "9195",
+    "ICICIBANK": "9194",
+    "TATASTEEL": "12902",
+    "SBIN": "11984",
+    "ITC": "13554",
+    "SUNPHARMA": "9134",
+    "BHARTIARTL": "2718"
+}
+
+
+# ============================================================
+# KAFKA CONFIGURATION
+# ============================================================
+
+KAFKA_BROKER = "localhost:9092"
+
+KAFKA_TOPIC = "stock-prices"
+
+
+# ============================================================
+# INTERVAL CONFIGURATION
+# ============================================================
+
+POLL_INTERVAL = 10
+
+KAFKA_PUBLISH_INTERVAL = 0.1
+
+REQUEST_TIMEOUT = 15
+
+REQUEST_GAP = 0.2
+
+
+# ============================================================
+# KAFKA PRODUCER
+# ============================================================
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BROKER,
+    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+    acks="all",
+    retries=5
+)
+
+
+# ============================================================
+# HTTP SESSIONS
+# ============================================================
+
+api_session = requests.Session()
+
+api_session.headers.update({
+    "x-api-key": API_KEY
+})
+
+
+yahoo_session = requests.Session()
+
+yahoo_session.headers.update({
+    "User-Agent": "Mozilla/5.0"
+})
+
+
+et_session = requests.Session()
+
+et_session.headers.update({
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
+})
+
+
+# ============================================================
+# SHARED DATA AND THREAD CONTROL
+# ============================================================
+
+latest_stock_data = {}
+
+cache_lock = threading.Lock()
+
+stop_event = threading.Event()
+
+
+def get_timestamp():
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ============================================================
+# UPDATE LATEST PRICE CACHE
+# ============================================================
+
+def update_cache(message):
+
+    symbol = message["symbol"]
+
+    with cache_lock:
+
+        latest_stock_data[symbol] = message.copy()
+
+
+# ============================================================
+# INDIANAPI - PRIMARY SOURCE
+# ============================================================
+
+def fetch_indianapi(symbol):
+
+    stock = STOCKS[symbol]
+
+    response = api_session.get(
+        INDIANAPI_URL,
+        params={"name": stock["name"]},
+        timeout=REQUEST_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    current_price = (
+        data.get("currentPrice", {}).get("NSE")
+    )
+
+    if current_price is None:
+
+        raise ValueError("NSE price unavailable")
+
+    current_price = float(current_price)
+
+    percent_change = data.get("percentChange")
+
+    change = None
+
+    if percent_change is not None:
+
+        percent_change = float(percent_change)
+
+        if percent_change > -100:
+
+            previous_close = (
+                current_price / (1 + percent_change / 100)
+            )
+
+            change = current_price - previous_close
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": stock["yahoo_symbol"],
+        "current_price": current_price,
+        "change": change,
+        "change_percent": percent_change,
+        "currency": "INR",
+        "source": "IndianAPI",
+        "timestamp": get_timestamp()
+    }
+
+
+# ============================================================
+# YAHOO FINANCE - FALLBACK 1
+# ============================================================
+
+def fetch_yahoo(symbol):
+
+    stock = STOCKS[symbol]
+
+    yahoo_symbol = stock["yahoo_symbol"]
+
+    response = yahoo_session.get(
+        f"{YAHOO_URL}{yahoo_symbol}",
+        params={
+            "range": "1d",
+            "interval": "1m"
+        },
+        timeout=REQUEST_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    results = data.get("chart", {}).get("result")
+
+    if not results:
+
+        raise ValueError("Yahoo data unavailable")
+
+    stock_data = results[0]
+
+    meta = stock_data.get("meta", {})
+
+    current_price = meta.get("regularMarketPrice")
+
+    previous_close = meta.get("previousClose")
+
+    if previous_close is None:
+
+        previous_close = meta.get("chartPreviousClose")
+
+    if current_price is None:
+
+        raise ValueError("Yahoo current price unavailable")
+
+    if previous_close is None:
+
+        raise ValueError("Yahoo previous close unavailable")
+
+    current_price = float(current_price)
+
+    previous_close = float(previous_close)
+
+    if previous_close == 0:
+
+        raise ValueError("Previous close is zero")
+
+    change = current_price - previous_close
+
+    change_percent = (
+        change / previous_close
+    ) * 100
+
+    market_timestamp = meta.get("regularMarketTime")
+
+    if market_timestamp:
+
+        source_timestamp = datetime.fromtimestamp(
+            market_timestamp,
+            tz=timezone.utc
+        ).isoformat()
+
+    else:
+
+        source_timestamp = get_timestamp()
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": yahoo_symbol,
+        "current_price": current_price,
+        "change": change,
+        "change_percent": change_percent,
+        "currency": meta.get("currency", "INR"),
+        "source": "Yahoo Finance",
+        "timestamp": source_timestamp,
+        "fetched_at": get_timestamp()
+    }
+
+
+# ============================================================
+# ECONOMIC TIMES - FALLBACK 2
+# ============================================================
+
+def fetch_economic_times(symbol):
+
+    stock = STOCKS[symbol]
+
+    company_id = ET_COMPANY_IDS.get(symbol)
+
+    if not company_id:
+
+        raise ValueError(
+            f"ET company ID not configured for {symbol}"
+        )
+
+    response = et_session.get(
+        ET_COMPANY_URL,
+        params={
+            "companyid": company_id,
+            "companytype": "equity"
+        },
+        timeout=REQUEST_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    nse = data.get("nse")
+
+    if not isinstance(nse, dict):
+
+        raise ValueError("ET NSE data unavailable")
+
+    current_price = nse.get("current")
+
+    change = nse.get("absoluteChange")
+
+    change_percent = nse.get("percentChange")
+
+    if current_price is None:
+
+        raise ValueError("ET current price missing")
+
+    if change_percent is None:
+
+        raise ValueError("ET percentage change missing")
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": stock["yahoo_symbol"],
+        "current_price": float(current_price),
+        "change": (
+            float(change) if change is not None else None
+        ),
+        "change_percent": float(change_percent),
+        "currency": "INR",
+        "source": "Economic Times",
+        "timestamp": (
+            nse.get("updatedDateTime") or get_timestamp()
+        ),
+        "fetched_at": get_timestamp()
+    }
+
+
+# ============================================================
+# STOCK FETCHING WITH FALLBACK
+# ============================================================
+
+def process_stock(symbol):
+
+    # --------------------------------------------------------
+    # STEP 1: INDIANAPI
+    # --------------------------------------------------------
+
+    try:
+
+        message = fetch_indianapi(symbol)
+
+        update_cache(message)
+
+        return message
+
+    except Exception as error:
+
+        print()
+
+    # --------------------------------------------------------
+    # STEP 2: YAHOO FINANCE
+    # --------------------------------------------------------
+
+    try:
+
+        message = fetch_yahoo(symbol)
+
+        update_cache(message)
+
+        return message
+
+    except Exception as error:
+
+        print(
+            f"[YAHOO FAILED] {symbol}: {error}"
+        )
+
+    # --------------------------------------------------------
+    # STEP 3: ECONOMIC TIMES
+    # --------------------------------------------------------
+
+    try:
+
+        message = fetch_economic_times(symbol)
+
+        update_cache(message)
+
+        return message
+
+    except Exception as error:
+
+        print(
+            f"[ET FAILED] {symbol}: {error}"
+        )
+
+    print(
+        f"[ALL SOURCES FAILED] {symbol}"
+    )
+
+    return None
+
+
+# ============================================================
+# STOCK FETCHER THREAD - EVERY 10 SECONDS
+# ============================================================
+
+def stock_fetcher():
+
+    print("[FETCHER] Started")
+
+    while not stop_event.is_set():
+
+        cycle_start = time.monotonic()
+
+        print("\n" + "=" * 65)
+
+        print("FETCHING LATEST STOCK PRICES")
+
+        print("Fetch time:", get_timestamp())
+
+        print("=" * 65)
+
+        for symbol in STOCKS:
+
+            if stop_event.is_set():
+
+                break
+
+            message = process_stock(symbol)
+
+            if message:
+
+                if message.get("change_percent") is not None:
+
+                    print(
+                        f"[FETCHED] {message['symbol']} | "
+                        f"Price: ₹{message['current_price']:.2f} | "
+                        f"Change: {message['change_percent']:+.2f}% | "
+                        f"Source: {message['source']}"
+                    )
+
+                else:
+
+                    print(
+                        f"[FETCHED] {message['symbol']} | "
+                        f"Price: ₹{message['current_price']:.2f} | "
+                        f"Change: Unavailable | "
+                        f"Source: {message['source']}"
+                    )
+
+            if stop_event.wait(REQUEST_GAP):
+
+                break
+
+        elapsed = time.monotonic() - cycle_start
+
+        remaining = max(
+            0,
+            POLL_INTERVAL - elapsed
+        )
+
+        if not stop_event.is_set():
+
+            print(
+                f"\n[FETCHER] Next refresh in "
+                f"{remaining:.2f} seconds"
+            )
+
+            stop_event.wait(remaining)
+
+    print("[FETCHER] Stopped")
+
+
+# ============================================================
+# KAFKA PUBLISHER THREAD - EVERY 100 MILLISECONDS
+# ============================================================
+
+def kafka_publisher():
+
+    print("[KAFKA PUBLISHER] Started")
+
+    next_publish = time.monotonic()
+
+    published_count = 0
+
+    while not stop_event.is_set():
+
+        now = time.monotonic()
+
+        if now < next_publish:
+
+            stop_event.wait(next_publish - now)
+
+            continue
+
+        # Take a thread-safe snapshot.
+
+        with cache_lock:
+
+            stock_snapshot = [
+                message.copy()
+                for message in latest_stock_data.values()
+            ]
+
+        # Wait until all 13 stocks have been fetched once.
+
+        if len(stock_snapshot) == len(STOCKS):
+
+            for message in stock_snapshot:
+
+                message["ingested_at"] = get_timestamp()
+
+                try:
+
+                    producer.send(
+                        KAFKA_TOPIC,
+                        value=message
+                    )
+
+                    published_count += 1
+
+                except Exception as error:
+
+                    print(
+                        f"[KAFKA SEND FAILED] "
+                        f"{message['symbol']}: {error}"
+                    )
+
+        # Schedule next publishing cycle.
+
+        next_publish += KAFKA_PUBLISH_INTERVAL
+
+        # Avoid burst publishing if the system falls behind.
+
+        current_time = time.monotonic()
+
+        if next_publish < current_time:
+
+            next_publish = (
+                current_time + KAFKA_PUBLISH_INTERVAL
+            )
+
+    producer.flush()
+
+    print(
+        f"[KAFKA PUBLISHER] Total messages queued: "
+        f"{published_count}"
+    )
+
+    print("[KAFKA PUBLISHER] Stopped")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    print("=" * 65)
+
+    print("       INDIAN STOCK PRICE KAFKA PRODUCER")
+
+    print("=" * 65)
+
+    print("Primary source       : IndianAPI")
+
+    print("Fallback 1           : Yahoo Finance Direct JSON")
+
+    print("Fallback 2           : Economic Times JSON")
+
+    print("Stock fetch interval : 10 seconds")
+
+    print("Kafka publish rate   : 100 milliseconds")
+
+    print("Total stocks         :", len(STOCKS))
+
+    print(
+        "Expected message rate:",
+        len(STOCKS) * 10,
+        "messages/sec"
+    )
+
+    print("Kafka broker         :", KAFKA_BROKER)
+
+    print("Kafka topic          :", KAFKA_TOPIC)
+
+    print("\nDisplay format       : Canonical NSE symbols")
+
+    print("\nPress Ctrl+C to stop.")
+
+    if not API_KEY:
+
+        print(
+            "\n[WARNING] INDIANAPI_KEY missing. "
+            "Yahoo fallback will be used."
+        )
+
+    fetcher_thread = threading.Thread(
+        target=stock_fetcher,
+        name="StockFetcher",
+        daemon=True
+    )
+
+    publisher_thread = threading.Thread(
+        target=kafka_publisher,
+        name="KafkaPublisher",
+        daemon=True
+    )
+
+    try:
+
+        fetcher_thread.start()
+
+        publisher_thread.start()
+
+        while (
+            fetcher_thread.is_alive()
+            and publisher_thread.is_alive()
+        ):
+
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+
+        print("\nStopping producer...")
+
+        stop_event.set()
+
+    finally:
+
+        stop_event.set()
+
+        fetcher_thread.join(timeout=20)
+
+        publisher_thread.join(timeout=20)
+
+        producer.flush()
+
+        producer.close()
+
+        api_session.close()
+        yahoo_session.close()
+
+        et_session.close()
+
+        print("\nProducer stopped successfully.")

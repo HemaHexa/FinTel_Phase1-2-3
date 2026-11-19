@@ -1,0 +1,186 @@
+
+import os
+import sys
+from pathlib import Path
+
+# --------------------------------------------------
+# 1. PROJECT PATH
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+SRC_PATH = PROJECT_ROOT / "silver_news" / "src"
+
+sys.path.insert(0, str(SRC_PATH))
+
+# --------------------------------------------------
+# 2. PYTHON CONFIGURATION
+# --------------------------------------------------
+
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
+from pyspark.sql import SparkSession
+
+from sentiment_analysis import analyse_sentiment
+
+
+# --------------------------------------------------
+# 3. CREATE SPARK SESSION
+# --------------------------------------------------
+
+spark = (
+    SparkSession.builder
+    .master("local[*]")
+    .appName("TestFinBERTSentiment")
+    .config("spark.sql.session.timeZone", "UTC")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("ERROR")
+
+
+try:
+
+    # --------------------------------------------------
+    # 4. CREATE SAMPLE CLEANED NEWS
+    # --------------------------------------------------
+
+    print("\n========== CREATING SAMPLE NEWS ==========")
+
+    news_records = [
+
+        {
+            "article_id": "TEST-001",
+            "headline": "Company reports strong quarterly profit",
+            "cleaned_headline": "Company reports strong quarterly profit",
+            "cleaned_full_text": "Company reports strong quarterly profit growth.",
+            "text_for_analysis": "Company reports strong quarterly profit growth.",
+            "matched_tickers": ["RELIANCE"]
+        },
+
+        {
+            "article_id": "TEST-002",
+            "headline": "Company faces significant financial losses",
+            "cleaned_headline": "Company faces significant financial losses",
+            "cleaned_full_text": "Company faces significant financial losses.",
+            "text_for_analysis": "Company faces significant financial losses.",
+            "matched_tickers": ["TCS", "INFY"]
+        }
+    ]
+
+    news_with_tickers_df = spark.createDataFrame(
+        news_records
+    )
+
+    # --------------------------------------------------
+    # 5. CREATE SAMPLE NEWS BY TICKER
+    # --------------------------------------------------
+
+    ticker_records = [
+
+        {
+            **news_records[0],
+            "ticker": "RELIANCE"
+        },
+
+        {
+            **news_records[1],
+            "ticker": "TCS"
+        },
+
+        {
+            **news_records[1],
+            "ticker": "INFY"
+        }
+    ]
+
+    news_by_ticker_df = spark.createDataFrame(
+        ticker_records
+    )
+
+    print("Sample articles:", len(news_records))
+    print("Article-ticker mappings:", len(ticker_records))
+
+    # --------------------------------------------------
+    # 6. RUN FINBERT SENTIMENT ANALYSIS
+    # --------------------------------------------------
+
+    print("\n========== RUNNING FINBERT ==========")
+
+    article_sentiment_df, ticker_sentiment_df = analyse_sentiment(
+        news_with_tickers_df,
+        news_by_ticker_df
+    )
+
+    # --------------------------------------------------
+    # 7. VERIFY ARTICLE-LEVEL RESULTS
+    # --------------------------------------------------
+
+    print("\n========== ARTICLE SENTIMENT ==========")
+
+    article_sentiment_df.select(
+        "article_id",
+        "sentiment",
+        "positive_score",
+        "negative_score",
+        "neutral_score",
+        "sentiment_score"
+    ).show(truncate=False)
+
+    # --------------------------------------------------
+    # 8. VERIFY TICKER-LEVEL RESULTS
+    # --------------------------------------------------
+
+    print("\n========== TICKER SENTIMENT ==========")
+
+    ticker_sentiment_df.select(
+        "article_id",
+        "ticker",
+        "sentiment",
+        "sentiment_score"
+    ).show(truncate=False)
+
+    # --------------------------------------------------
+    # 9. VALIDATION CHECKS
+    # --------------------------------------------------
+
+    article_count = article_sentiment_df.count()
+    ticker_count = ticker_sentiment_df.count()
+
+    missing_sentiment = article_sentiment_df.filter(
+        "sentiment IS NULL"
+    ).count()
+
+    missing_scores = article_sentiment_df.filter(
+        """
+        positive_score IS NULL OR
+        negative_score IS NULL OR
+        neutral_score IS NULL OR
+        sentiment_score IS NULL
+        """
+    ).count()
+
+    print("\n========== TEST SUMMARY ==========")
+
+    print("Articles processed:", article_count)
+    print("Ticker mappings processed:", ticker_count)
+    print("Missing sentiment:", missing_sentiment)
+    print("Missing sentiment scores:", missing_scores)
+
+    if (
+        article_count == 2
+        and ticker_count == 3
+        and missing_sentiment == 0
+        and missing_scores == 0
+    ):
+        print("\nFINBERT TEST PASSED!")
+
+    else:
+        print("\nFINBERT TEST NEEDS REVIEW.")
+
+finally:
+
+    spark.stop()
+
+    print("\nSPARK SESSION STOPPED.")

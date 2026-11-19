@@ -1,0 +1,22 @@
+feedparser
+requests
+kafka-python
+python-dotenv
+truststore
+sentence-transformers
+
+# Apache Spark
+pyspark==4.3.0
+
+# Data processing and Parquet
+pandas>=2.2,<3.0
+pyarrow>=18,<25
+numpy>=1.26,<3.0
+
+# HTML cleaning
+beautifulsoup4>=4.12,<5.0
+
+# FinBERT sentiment analysis
+transformers>=4.45,<5.0
+torch>=2.7,<3.0
+safetensors>=0.4,<1.0

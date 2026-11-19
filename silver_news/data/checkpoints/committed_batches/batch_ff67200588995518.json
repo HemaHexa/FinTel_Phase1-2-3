@@ -1,0 +1,13 @@
+{
+    "batch_id": "batch_ff67200588995518",
+    "status": "COMMITTED",
+    "bronze_files": [
+        "news_20261119T090215860971Z_311092d8.parquet",
+        "news_20261119T090215968523Z_fc80ce3f.parquet"
+    ],
+    "processed_article_ids": [
+        "04416cd594c941718009f41fab2b69ab2b215f0647a2ba22cff8c80da8310639",
+        "2a922252f8120bf5931c3d38d54ed2e95370d84866c3e9598faa2088b9056c30",
+        "4ba560971bfcd1b116acc852c7436f9b8bc8e93765e061a4112c40b697ebdd12"
+    ]
+}

@@ -1,0 +1,52 @@
+
+from pathlib import Path
+
+
+# --------------------------------------------------
+# 1. OUTPUT PATH
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+DLQ_PATH = (
+    PROJECT_ROOT
+    / "silver_news"
+    / "data"
+    / "processed"
+    / "dead_letter"
+)
+
+
+# --------------------------------------------------
+# 2. WRITE INVALID RECORDS
+# --------------------------------------------------
+
+def write_dead_letter(invalid_df, output_path=DLQ_PATH):
+
+    print("\n========== WRITING DEAD LETTER RECORDS ==========")
+
+    # Count invalid records.
+    invalid_count = invalid_df.count()
+
+    if invalid_count == 0:
+        print("No invalid records. DLQ write skipped.")
+        return 0
+
+    # Create output directory.
+    output_path = Path(output_path)
+    output_path.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # Append invalid records as Parquet.
+    (
+        invalid_df.write
+        .mode("append")
+        .parquet(str(output_path))
+    )
+
+    print("Invalid records written:", invalid_count)
+    print("DLQ location:", output_path)
+
+    return invalid_count

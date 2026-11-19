@@ -1,0 +1,15 @@
+{
+    "batch_id": "batch_ccd59bbed05acb91",
+    "status": "COMMITTED",
+    "bronze_files": [
+        "news_20261118T062018498715Z_0678ba20.parquet",
+        "news_20261118T062018665286Z_11170060.parquet"
+    ],
+    "processed_article_ids": [
+        "79299733ac79ca49bd5ab59407f0b8fd7e8333dc6d4473b2d24b69c216a5f6fe",
+        "c9ecf1b60d0272a0c5ef88b2d0169f0071b994ebf172a858518098675be919aa",
+        "ca8255555109e735b2787c960b2af13bc7937bd89c523777d18dbdc376332764",
+        "d8109b8dca20f35621dfae590e1a36da013dd2013b43be133b38851b5810f4f6",
+        "fa58932eeaf5e42f9dc65050307e7b91088d9d351633bfdce70f206bf8067520"
+    ]
+}

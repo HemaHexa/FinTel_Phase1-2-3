@@ -1,0 +1,129 @@
+
+from pyspark.sql.functions import (
+    col,
+    regexp_replace,
+    trim,
+    coalesce,
+    lit,
+    when
+)
+
+
+def clean_news(news_df):
+
+    print("\n========== STARTING HTML CLEANING ==========")
+
+    # 1. Replace HTML block tags with spaces before removing tags.
+    # This prevents words from adjacent HTML elements joining together.
+    cleaned_df = news_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            coalesce(col("full_text"), lit("")),
+            r"(?i)<\s*(br|/p|p|/div|div|/li|li|/font|font)\b[^>]*>",
+            " "
+        )
+    )
+
+    # 2. Remove remaining HTML tags.
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"<[^>]*>",
+            " "
+        )
+    )
+
+    # 3. Decode common HTML entities.
+    # Decode ampersand last to avoid accidental double decoding.
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&nbsp;|&#160;|&#xA0;",
+            " "
+        )
+    )
+
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&quot;|&#34;|&ldquo;|&rdquo;",
+            '"'
+        )
+    )
+
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&apos;|&#39;|&#x27;|&lsquo;|&rsquo;",
+            "'"
+        )
+    )
+
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&lt;",
+            "<"
+        )
+    )
+
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&gt;",
+            ">"
+        )
+    )
+
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        regexp_replace(
+            col("cleaned_full_text"),
+            r"(?i)&amp;",
+            "&"
+        )
+    )
+
+    # 4. Normalize whitespace.
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_full_text",
+        trim(
+            regexp_replace(
+                col("cleaned_full_text"),
+                r"\s+",
+                " "
+            )
+        )
+    )
+
+    # 5. Clean headline separately.
+    cleaned_df = cleaned_df.withColumn(
+        "cleaned_headline",
+        trim(
+            regexp_replace(
+                coalesce(col("headline"), lit("")),
+                r"\s+",
+                " "
+            )
+        )
+    )
+
+    # 6. Select text for sentiment analysis.
+    # Prefer headline; use cleaned full text as fallback.
+    cleaned_df = cleaned_df.withColumn(
+        "text_for_analysis",
+        when(
+            col("cleaned_headline") != "",
+            col("cleaned_headline")
+        ).otherwise(col("cleaned_full_text"))
+    )
+
+    print("HTML cleaning completed.")
+
+    return cleaned_df

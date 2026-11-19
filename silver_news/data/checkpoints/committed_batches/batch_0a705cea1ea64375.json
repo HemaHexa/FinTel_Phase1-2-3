@@ -1,0 +1,10 @@
+{
+    "batch_id": "batch_0a705cea1ea64375",
+    "status": "COMMITTED",
+    "bronze_files": [
+        "news_20261119T095022765784Z_c9fb2cfe.parquet"
+    ],
+    "processed_article_ids": [
+        "0f1fe0aa57a46b54841fb6b309bb209af9d3089113faabf30207fd5a50dae094"
+    ]
+}

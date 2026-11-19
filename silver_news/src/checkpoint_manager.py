@@ -1,0 +1,104 @@
+
+import json
+from pathlib import Path
+
+
+# --------------------------------------------------
+# 1. CHECKPOINT PATHS
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+CHECKPOINT_DIR = (
+    PROJECT_ROOT
+    / "silver_news"
+    / "data"
+    / "checkpoints"
+)
+
+PROCESSED_FILES_PATH = (
+    CHECKPOINT_DIR / "processed_files.json"
+)
+
+PROCESSED_ARTICLE_IDS_PATH = (
+    CHECKPOINT_DIR / "processed_article_ids.json"
+)
+
+
+# --------------------------------------------------
+# 2. LOAD CHECKPOINT
+# --------------------------------------------------
+
+def load_checkpoint(checkpoint_path):
+
+    checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.exists():
+        return []
+
+    with open(checkpoint_path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+# --------------------------------------------------
+# 3. SAVE CHECKPOINT SAFELY
+# --------------------------------------------------
+
+def save_checkpoint(checkpoint_path, values):
+
+    checkpoint_path = Path(checkpoint_path)
+
+    checkpoint_path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    temporary_path = checkpoint_path.with_suffix(".tmp")
+
+    with open(temporary_path, "w", encoding="utf-8") as file:
+        json.dump(
+            sorted(set(values)),
+            file,
+            indent=4
+        )
+
+    # Replace the old checkpoint only after the new file is written.
+    temporary_path.replace(checkpoint_path)
+
+
+# --------------------------------------------------
+# 4. PROCESSED BRONZE FILES
+# --------------------------------------------------
+
+def load_processed_files():
+
+    return set(
+        load_checkpoint(PROCESSED_FILES_PATH)
+    )
+
+
+def save_processed_files(processed_files):
+
+    save_checkpoint(
+        PROCESSED_FILES_PATH,
+        processed_files
+    )
+
+
+# --------------------------------------------------
+# 5. PROCESSED ARTICLE IDS
+# --------------------------------------------------
+
+def load_processed_article_ids():
+
+    return set(
+        load_checkpoint(PROCESSED_ARTICLE_IDS_PATH)
+    )
+
+
+def save_processed_article_ids(article_ids):
+
+    save_checkpoint(
+        PROCESSED_ARTICLE_IDS_PATH,
+        article_ids
+    )

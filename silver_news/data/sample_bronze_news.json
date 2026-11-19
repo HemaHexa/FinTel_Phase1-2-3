@@ -1,0 +1,66 @@
+ 
+[
+  {
+    "article_id": "NEWS-001",
+    "published_at": "2026-11-09T05:30:00Z",
+    "source": "Economic Times",
+    "headline": "Reliance Industries shares rise after strong quarterly results",
+    "body_html": "<p>Reliance Industries reported strong quarterly results. <b>Revenue increased</b> compared with the previous quarter, boosting investor confidence.</p>",
+    "url": "https://example.com/news/001",
+    "ingested_at": "2026-11-09T05:35:00Z"
+  },
+  {
+    "article_id": "NEWS-002",
+    "published_at": "2026-11-09T06:00:00Z",
+    "source": "Business Standard",
+    "headline": "TCS announces expansion in artificial intelligence services",
+    "body_html": "<p>Tata Consultancy Services announced an expansion of its AI services. <strong>The company expects</strong> growing demand from global customers.</p>",
+    "url": "https://example.com/news/002",
+    "ingested_at": "2026-11-09T06:05:00Z"
+  },
+  {
+    "article_id": "NEWS-003",
+    "published_at": "2026-11-09T06:30:00Z",
+    "source": "Mint",
+    "headline": "Infosys and Wipro face pressure amid concerns over IT spending",
+    "body_html": "<p>Infosys and Wipro shares faced pressure after concerns about reduced IT spending. <i>Investors are monitoring</i> the sector outlook.</p>",
+    "url": "https://example.com/news/003",
+    "ingested_at": "2026-11-09T06:35:00Z"
+  },
+  {
+    "article_id": "NEWS-004",
+    "published_at": "2026-11-09T07:00:00Z",
+    "source": "Reuters",
+    "headline": "HDFC Bank reports steady growth in quarterly deposits",
+    "body_html": "<p>HDFC Bank reported steady growth in deposits during the quarter. Its banking operations remained stable.</p>",
+    "url": "https://example.com/news/004",
+    "ingested_at": "2026-11-09T07:05:00Z"
+  },
+  {
+    "article_id": "NEWS-005",
+    "published_at": "2026-11-09T07:30:00Z",
+    "source": "CNBC",
+    "headline": "Reliance and TCS attract investor attention",
+    "body_html": "<p>Reliance Industries and Tata Consultancy Services attracted investor attention following positive market developments.</p>",
+    "url": "https://example.com/news/005",
+    "ingested_at": "2026-11-09T07:35:00Z"
+  },
+  {
+    "article_id": "NEWS-001",
+    "published_at": "2026-11-09T05:30:00Z",
+    "source": "Economic Times",
+    "headline": "Reliance Industries shares rise after strong quarterly results",
+    "body_html": "<p>Reliance Industries reported strong quarterly results. <b>Revenue increased</b> compared with the previous quarter, boosting investor confidence.</p>",
+    "url": "https://example.com/news/001",
+    "ingested_at": "2026-11-09T07:40:00Z"
+ },
+ {
+    "article_id": "NEWS-002",
+    "published_at": "2026-11-09T06:00:00Z",
+    "source": "Business Standard",
+    "headline": "TCS announces expansion in artificial intelligence services",
+    "body_html": "<p>Tata Consultancy Services announced an expansion of its AI services. <strong>The company expects</strong> growing demand from global customers.</p>",
+    "url": "https://example.com/news/002",
+    "ingested_at": "2026-11-09T07:45:00Z"
+ }
+]

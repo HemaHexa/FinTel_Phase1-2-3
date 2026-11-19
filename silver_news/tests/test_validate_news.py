@@ -1,0 +1,187 @@
+
+import sys
+import os
+from pathlib import Path
+
+from pyspark.sql import SparkSession
+
+
+
+# --------------------------------------------------
+# 1. CONFIGURE PYTHON FOR SPARK
+# --------------------------------------------------
+
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+#-------------------------------------------------
+# 1. IMPORT VALIDATION MODULE
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+SRC_PATH = PROJECT_ROOT / "silver_news" / "src"
+
+sys.path.insert(0, str(SRC_PATH))
+
+from validate_news import validate_news
+
+
+# --------------------------------------------------
+# 2. CREATE SPARK SESSION
+# --------------------------------------------------
+
+spark = (
+    SparkSession.builder
+    .appName("TestNewsValidation")
+    .master("local[*]")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("ERROR")
+
+
+# --------------------------------------------------
+# 3. SAMPLE TEST DATA
+# --------------------------------------------------
+
+sample_data = [
+
+    # Valid record
+    {
+        "article_id": "TEST-001",
+        "url": "https://example.com/1",
+        "headline": "Reliance shares rise",
+        "full_text": "Reliance shares increased today.",
+        "json_parse_failed": False
+    },
+
+    # Missing article ID
+    {
+        "article_id": None,
+        "url": "https://example.com/2",
+        "headline": "TCS announces results",
+        "full_text": "TCS announces quarterly results.",
+        "json_parse_failed": False
+    },
+
+    # Missing URL
+    {
+        "article_id": "TEST-003",
+        "url": None,
+        "headline": "Infosys announces results",
+        "full_text": "Infosys announces quarterly results.",
+        "json_parse_failed": False
+    },
+
+    # Missing both headline and full text
+    {
+        "article_id": "TEST-004",
+        "url": "https://example.com/4",
+        "headline": None,
+        "full_text": None,
+        "json_parse_failed": False
+    },
+
+    # Invalid JSON
+    {
+        "article_id": "TEST-005",
+        "url": "https://example.com/5",
+        "headline": "Invalid record",
+        "full_text": "This record came from invalid JSON.",
+        "json_parse_failed": True
+    },
+
+    # Multiple validation failures
+    {
+        "article_id": None,
+        "url": None,
+        "headline": None,
+        "full_text": None,
+        "json_parse_failed": False
+    }
+]
+
+
+# --------------------------------------------------
+# 4. CREATE DATAFRAME
+# --------------------------------------------------
+
+candidates_df = spark.createDataFrame(sample_data)
+
+print("\n========== INPUT RECORDS ==========")
+
+candidates_df.show(truncate=False)
+
+
+# --------------------------------------------------
+# 5. RUN VALIDATION
+# --------------------------------------------------
+
+valid_df, invalid_df = validate_news(candidates_df)
+
+
+# --------------------------------------------------
+# 6. DISPLAY RESULTS
+# --------------------------------------------------
+
+print("\n========== VALID RECORDS ==========")
+
+valid_df.show(truncate=False)
+
+print("\n========== DEAD LETTER RECORDS ==========")
+
+invalid_df.select(
+    "article_id",
+    "validation_reason",
+    "validation_status"
+).show(truncate=False)
+
+
+# --------------------------------------------------
+# 7. VERIFY RESULTS
+# --------------------------------------------------
+
+valid_count = valid_df.count()
+invalid_count = invalid_df.count()
+
+assert valid_count == 1, (
+    f"Expected 1 valid record, got {valid_count}"
+)
+
+assert invalid_count == 5, (
+    f"Expected 5 invalid records, got {invalid_count}"
+)
+
+assert (
+    invalid_df.filter(
+        invalid_df.validation_reason.contains("missing_article_id")
+    ).count() == 2
+)
+
+assert (
+    invalid_df.filter(
+        invalid_df.validation_reason.contains("missing_url")
+    ).count() == 2
+)
+
+assert (
+    invalid_df.filter(
+        invalid_df.validation_reason.contains(
+            "missing_headline_and_full_text"
+        )
+    ).count() == 2
+)
+
+assert (
+    invalid_df.filter(
+        invalid_df.validation_reason.contains("invalid_json")
+    ).count() == 1
+)
+
+assert valid_count + invalid_count == len(sample_data)
+
+print("\n========================================")
+print("NEWS VALIDATION TEST PASSED!")
+print("========================================")
+
+spark.stop()

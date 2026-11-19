@@ -1,0 +1,112 @@
+
+import shutil
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+# --------------------------------------------------
+# 1. PROJECT PATHS
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+SILVER_PATH = (
+    PROJECT_ROOT
+    / "silver_news"
+    / "data"
+    / "silver"
+)
+
+NEWS_OUTPUT_PATH = SILVER_PATH / "news"
+
+NEWS_BY_TICKER_OUTPUT_PATH = (
+    SILVER_PATH / "news_by_ticker"
+)
+
+
+# --------------------------------------------------
+# 2. SAVE DATAFRAME AS PARQUET
+# --------------------------------------------------
+
+def save_dataframe_as_parquet(dataframe, output_path):
+
+    print(f"\nWriting output: {output_path}")
+
+    # Convert Spark DataFrame into Python records.
+    records = [
+        row.asDict(recursive=True)
+        for row in dataframe.collect()
+    ]
+
+    if not records:
+        print("No records available. Creating empty output is skipped.")
+        return 0
+
+    # Convert records into an Arrow table.
+    table = pa.Table.from_pylist(records)
+
+    # Create output folder.
+    output_path.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # Write Parquet file.
+    parquet_file = output_path / "part-00000.parquet"
+
+    pq.write_table(
+        table,
+        parquet_file,
+        compression="snappy"
+    )
+
+    print("Saved successfully:", parquet_file)
+    print("Records written:", len(records))
+
+    return len(records)
+
+
+# --------------------------------------------------
+# 3. WRITE FINAL SILVER OUTPUTS
+# --------------------------------------------------
+
+def write_silver_outputs(
+    news_with_sentiment_df,
+    news_by_ticker_with_sentiment_df
+):
+
+    print("\n========== WRITING FINAL SILVER OUTPUTS ==========")
+
+    # Save article-level Silver data.
+    news_count = save_dataframe_as_parquet(
+        news_with_sentiment_df,
+        NEWS_OUTPUT_PATH
+    )
+
+    # Save article-ticker-level Silver data.
+    ticker_count = save_dataframe_as_parquet(
+        news_by_ticker_with_sentiment_df,
+        NEWS_BY_TICKER_OUTPUT_PATH
+    )
+
+    # --------------------------------------------------
+    # 4. FINAL SUMMARY
+    # --------------------------------------------------
+
+    print("\n========================================")
+    print("SILVER OUTPUT GENERATION COMPLETED")
+    print("========================================")
+
+    print("Unique articles written:", news_count)
+
+    print("Article-ticker records written:", ticker_count)
+
+    print("\nFinal output locations:")
+
+    print("1.", NEWS_OUTPUT_PATH)
+
+    print("2.", NEWS_BY_TICKER_OUTPUT_PATH)
+
+    return news_count, ticker_count

@@ -1,0 +1,521 @@
+import os
+from pathlib import Path
+import time
+# ============================================================
+# 1. WINDOWS HADOOP CONFIGURATION
+# ============================================================
+
+if os.name == "nt" and Path(r"C:\hadoop\bin\winutils.exe").exists():
+    os.environ["HADOOP_HOME"] = r"C:\hadoop"
+    os.environ["PATH"] = (
+        r"C:\hadoop\bin" + os.pathsep + os.environ.get("PATH", "")
+    )
+
+# ============================================================
+# 2. IMPORTS
+# ============================================================
+
+try:
+    from delta import configure_spark_with_delta_pip
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Delta Lake is not installed in this Python environment. "
+        "Activate the project virtual environment and run: "
+        "python -m pip install -r requirements.txt"
+    ) from exc
+
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    DoubleType
+)
+
+# ============================================================
+# 3. CONFIGURATION
+# ============================================================
+
+PROJECT_ROOT = Path.cwd()
+
+SILVER_DIR = PROJECT_ROOT / "silver"
+DATA_DIR = SILVER_DIR / "data"
+CHECKPOINT_DIR = SILVER_DIR / "checkpoints"
+
+SILVER_PATH = DATA_DIR / "stock_silver"
+QUARANTINE_PATH = DATA_DIR / "stock_quarantine"
+
+# One checkpoint for the single streaming query writing both tables.
+CHECKPOINT_PATH = CHECKPOINT_DIR / "stock_silver"
+
+KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+KAFKA_TOPIC = "stock-prices"
+
+STARTING_OFFSETS = "latest"
+MAX_OFFSETS_PER_TRIGGER = "2000"
+TRIGGER_INTERVAL = "500 milliseconds"
+
+EXPECTED_SYMBOLS = [
+    "RELIANCE",
+    "TCS",
+    "INFY",
+    "HDFCBANK",
+    "ICICIBANK",
+    "TATASTEEL",
+    "SBIN",
+    "ITC",
+    "SUNPHARMA",
+    "BHARTIARTL",
+    "ADANIENT",
+    "COALINDIA",
+    "BAJFINANCE"
+]
+
+# ============================================================
+# 4. STOCK JSON SCHEMA
+# ============================================================
+
+stock_schema = StructType([
+    StructField("symbol", StringType(), True),
+    StructField("yahoo_symbol", StringType(), True),
+    StructField("current_price", DoubleType(), True),
+    StructField("change", DoubleType(), True),
+    StructField("change_percent", DoubleType(), True),
+    StructField("currency", StringType(), True),
+    StructField("source", StringType(), True),
+    StructField("timestamp", StringType(), True),
+    StructField("fetched_at", StringType(), True),
+    StructField("ingested_at", StringType(), True)
+])
+
+# ============================================================
+# 5. CREATE SPARK SESSION
+# ============================================================
+
+def create_spark_session():
+
+    builder = (
+        SparkSession.builder
+        .appName("Indian-Stock-Silver-Layer")
+
+        # Delta Lake configuration
+        .config(
+            "spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension"
+        )
+
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        )
+
+        # Performance configurations
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.default.parallelism", "6")
+
+        # Local execution
+        .config("spark.driver.host","127.0.0.1")
+        .config("spark.driver.bindAddress","127.0.0.1")
+        .config("spark.ui.enabled", "false")
+        .master("local[2]")
+
+    )
+
+    spark = configure_spark_with_delta_pip(
+        builder,
+        extra_packages=[
+            "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1"
+        ]
+    ).getOrCreate()
+
+    spark.sparkContext.setLogLevel("WARN")
+
+    print("Spark Version:", spark.version)
+    print("Spark Master:", spark.sparkContext.master)
+    print("Delta Lake configuration loaded.")
+    print("Kafka connector configured.")
+
+    return spark
+# ============================================================
+# 6. READ DATA FROM KAFKA
+# ============================================================
+
+def read_kafka_stream(spark):
+
+    kafka_df = (
+        spark.readStream
+        .format("kafka")
+
+        .option(
+            "kafka.bootstrap.servers",
+            KAFKA_BOOTSTRAP_SERVERS
+        )
+
+        .option("subscribe", KAFKA_TOPIC)
+
+        .option(
+            "startingOffsets",
+            STARTING_OFFSETS
+        )
+
+        .option(
+            "maxOffsetsPerTrigger",
+            MAX_OFFSETS_PER_TRIGGER
+        )
+
+        .load()
+    )
+
+    return kafka_df
+
+
+# ============================================================
+# 7. PARSE AND VALIDATE STOCK DATA
+# ============================================================
+
+def transform_batch(batch_df):
+
+    # Preserve Kafka metadata and original JSON.
+    records = batch_df.select(
+        "topic",
+        "partition",
+        "offset",
+
+        F.col("timestamp").alias("kafka_timestamp"),
+
+        F.col("key").cast("string").alias("kafka_key"),
+
+        F.col("value").cast("string").alias("raw_json")
+    )
+
+    # Parse JSON.
+    parsed = (
+        records
+
+        .withColumn(
+            "parsed_json",
+            F.from_json("raw_json", stock_schema)
+        )
+
+        .select(
+            "topic",
+            "partition",
+            "offset",
+            "kafka_timestamp",
+            "kafka_key",
+            "raw_json",
+            "parsed_json.*"
+        )
+    )
+
+    # Unique ID for every Kafka publication.
+    parsed = parsed.withColumn(
+        "tick_id",
+        F.concat_ws(
+            "-",
+            F.col("topic"),
+            F.col("partition").cast("string"),
+            F.col("offset").cast("string")
+        )
+    )
+
+    # Convert producer timestamps into Spark timestamps.
+    parsed = (
+        parsed
+
+        .withColumn(
+            "market_timestamp",
+            F.try_to_timestamp("timestamp")
+        )
+
+        .withColumn(
+            "fetched_timestamp",
+            F.try_to_timestamp("fetched_at")
+        )
+
+        .withColumn(
+            "publication_timestamp",
+            F.try_to_timestamp("ingested_at")
+        )
+    )
+
+    # Validation rules.
+    rejection_reason = F.concat_ws(
+        "; ",
+
+        F.when(
+            F.col("symbol").isNull()
+            | (F.trim("symbol") == ""),
+            "Missing symbol"
+        ),
+
+        F.when(
+            ~F.col("symbol").isin(EXPECTED_SYMBOLS),
+            "Unknown stock symbol"
+        ),
+
+        F.when(
+            F.col("yahoo_symbol").isNull()
+            | (F.trim("yahoo_symbol") == ""),
+            "Missing yahoo_symbol"
+        ),
+
+        F.when(
+            F.col("current_price").isNull(),
+            "Missing or invalid current_price"
+        ),
+
+        F.when(
+            F.col("current_price") <= 0,
+            "current_price must be greater than zero"
+        ),
+
+        F.when(
+            F.col("currency").isNull()
+            | (F.trim("currency") == ""),
+            "Missing currency"
+        ),
+
+        F.when(
+            F.col("source").isNull()
+            | (F.trim("source") == ""),
+            "Missing source"
+        ),
+
+        F.when(
+            F.col("market_timestamp").isNull(),
+            "Invalid market timestamp"
+        ),
+
+        F.when(
+            F.col("fetched_timestamp").isNull(),
+            "Invalid fetched_at timestamp"
+        ),
+
+        F.when(
+            F.col("publication_timestamp").isNull(),
+            "Invalid ingested_at timestamp"
+        )
+    )
+
+    transformed = (
+        parsed
+
+        .withColumn(
+            "rejection_reason",
+            rejection_reason
+        )
+
+        .withColumn(
+            "silver_ingested_at",
+            F.current_timestamp()
+        )
+    )
+
+    # Valid stock records.
+    valid_records = (
+        transformed
+
+        .filter(F.col("rejection_reason") == "")
+
+        .select(
+            "tick_id",
+            "symbol",
+            "yahoo_symbol",
+            "current_price",
+            "change",
+            "change_percent",
+            "currency",
+            "source",
+            "market_timestamp",
+            "fetched_timestamp",
+            "publication_timestamp",
+            "silver_ingested_at",
+            "topic",
+            "partition",
+            "offset",
+            "kafka_timestamp",
+            "kafka_key",
+            "raw_json"
+        )
+    )
+
+    # Invalid stock records.
+    quarantine_records = (
+        transformed
+
+        .filter(F.col("rejection_reason") != "")
+
+        .select(
+            "tick_id",
+            "symbol",
+            "yahoo_symbol",
+            "current_price",
+            "change",
+            "change_percent",
+            "currency",
+            "source",
+            "timestamp",
+            "fetched_at",
+            "ingested_at",
+            "market_timestamp",
+            "fetched_timestamp",
+            "publication_timestamp",
+            "rejection_reason",
+            "silver_ingested_at",
+            "topic",
+            "partition",
+            "offset",
+            "kafka_timestamp",
+            "kafka_key",
+            "raw_json"
+        )
+    )
+
+    return valid_records, quarantine_records
+
+
+# ============================================================
+# 8. WRITE DATA INTO DELTA LAKE
+# ============================================================
+
+def write_batch_to_delta(batch_df, batch_id):
+ 
+    start = time.perf_counter()
+ 
+    # Separate valid and invalid records
+    valid_records, quarantine_records = transform_batch(batch_df)
+ 
+    # Write valid records to Silver Delta table
+    write_delta_if_not_empty(
+        valid_records,
+        SILVER_PATH,
+        "stock-silver-valid",
+        batch_id
+    )
+ 
+    # Write invalid records to Quarantine Delta table
+    write_delta_if_not_empty(
+        quarantine_records,
+        QUARANTINE_PATH,
+        "stock-silver-quarantine",
+        batch_id
+    )
+ 
+    elapsed = (time.perf_counter() - start) * 1000
+ 
+    print(
+        f"Micro-batch {batch_id} processed successfully | "
+        f"Processing time: {elapsed:.2f} ms"
+    )
+
+def write_delta_if_not_empty(records_df, output_path, table_name, batch_id):
+    """Append a non-empty DataFrame to a Delta Lake table."""
+
+    record_count = records_df.limit(1).count()
+
+    if record_count == 0:
+        print(
+            f"Micro-batch {batch_id}: {table_name} received no records; "
+            "nothing written"
+        )
+        return
+
+    record_count = records_df.count()
+
+    (
+        records_df.write
+        .format("delta")
+        .mode("append")
+        .option("mergeSchema", "true")
+        .save(str(output_path))
+    )
+
+    print(
+        f"Micro-batch {batch_id}: wrote {record_count} records "
+        f"to {table_name} at {output_path}"
+    )
+# ============================================================
+# 9. MAIN STREAMING APPLICATION
+# ============================================================
+
+def main():
+
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    CHECKPOINT_PATH.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    spark = create_spark_session()
+
+    print("=" * 60)
+    print("INDIAN STOCK SILVER STREAMING JOB")
+    print("=" * 60)
+
+    print("Spark version:", spark.version)
+
+    print("Kafka broker:", KAFKA_BOOTSTRAP_SERVERS)
+
+    print("Kafka topic:", KAFKA_TOPIC)
+
+    print("Silver path:", SILVER_PATH)
+
+    print("Quarantine path:", QUARANTINE_PATH)
+
+    print("=" * 60)
+
+    kafka_stream = read_kafka_stream(spark)
+
+    query = (
+        kafka_stream.writeStream
+
+        .queryName("stock-silver-stream")
+
+        .foreachBatch(write_batch_to_delta)
+
+        .option(
+            "checkpointLocation",
+            str(CHECKPOINT_PATH)
+        )
+
+        .trigger(
+            processingTime=TRIGGER_INTERVAL
+        )
+
+        .start()
+    )
+
+    print("Silver streaming is running...")
+    print("Press CTRL + C to stop.")
+
+    try:
+
+        query.awaitTermination()
+
+    except KeyboardInterrupt:
+
+        print("Stopping Silver streaming...")
+
+        query.stop()
+
+    finally:
+
+        spark.stop()
+
+        print("Spark session stopped.")
+
+
+# ============================================================
+# 10. APPLICATION ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()

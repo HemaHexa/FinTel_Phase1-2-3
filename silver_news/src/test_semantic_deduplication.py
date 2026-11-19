@@ -1,0 +1,249 @@
+import os
+import sys
+import tempfile
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import deduplicate_news
+
+# --------------------------------------------------
+# 1. PROJECT SETUP
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+sys.path.insert(
+    0,
+    str(PROJECT_ROOT / "silver_news" / "src")
+)
+
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
+from pyspark.sql import SparkSession
+
+import deduplicate_news
+
+
+# --------------------------------------------------
+# 2. CREATE SPARK SESSION
+# --------------------------------------------------
+
+spark = (
+    SparkSession.builder
+    .appName("SemanticDeduplicationTest")
+    .master("local[2]")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("ERROR")
+
+
+# --------------------------------------------------
+# 3. CREATE HISTORICAL TEST DATA
+# --------------------------------------------------
+
+base_time = datetime(
+    2026, 11, 17, 10, 0,
+    tzinfo=timezone.utc
+)
+
+historical_article = {
+    "article_id": "HIST001",
+    "matched_tickers": ["RELIANCE"],
+    "cleaned_headline": (
+        "Reliance Industries announces a major "
+        "investment in renewable energy"
+    ),
+    "headline": (
+        "Reliance Industries announces a major "
+        "investment in renewable energy"
+    ),
+    "ingested_at": base_time,
+    "source": "Economic Times",
+    "url": "https://example.com/historical"
+}
+
+
+# --------------------------------------------------
+# 4. CREATE TEMPORARY HISTORICAL PARQUET
+# --------------------------------------------------
+
+temp_directory = tempfile.TemporaryDirectory()
+
+test_history_path = (
+    Path(temp_directory.name) / "historical_news"
+)
+
+test_history_path.mkdir(parents=True)
+
+historical_table = pa.Table.from_pylist(
+    [historical_article]
+)
+
+pq.write_table(
+    historical_table,
+    test_history_path / "part-00000.parquet"
+)
+
+# Redirect the function to test data.
+# Do not read or modify your actual Silver outputs.
+
+deduplicate_news.SILVER_NEWS_PATH = test_history_path
+
+
+# --------------------------------------------------
+# 5. CREATE INCOMING TEST ARTICLES
+# --------------------------------------------------
+
+incoming_articles = [
+
+    # Same news from another source: expected duplicate.
+    {
+        "article_id": "NEW001",
+        "matched_tickers": ["RELIANCE"],
+        "cleaned_headline": (
+            "Reliance announces a major investment "
+            "in renewable energy"
+        ),
+        "headline": (
+            "Reliance announces a major investment "
+            "in renewable energy"
+        ),
+        "ingested_at": base_time + timedelta(minutes=15),
+        "source": "Business Standard",
+        "url": "https://example.com/new001"
+    },
+
+    # Different news about the same company: expected unique.
+    {
+        "article_id": "NEW002",
+        "matched_tickers": ["RELIANCE"],
+        "cleaned_headline": (
+            "Reliance Industries reports quarterly "
+            "profit growth"
+        ),
+        "headline": (
+            "Reliance Industries reports quarterly "
+            "profit growth"
+        ),
+        "ingested_at": base_time + timedelta(minutes=30),
+        "source": "CNBC",
+        "url": "https://example.com/new002"
+    },
+
+    # Same ticker, but outside 24 hours: expected unique.
+    {
+        "article_id": "NEW003",
+        "matched_tickers": ["RELIANCE"],
+        "cleaned_headline": (
+            "Reliance Industries announces a major "
+            "investment in renewable energy"
+        ),
+        "headline": (
+            "Reliance Industries announces a major "
+            "investment in renewable energy"
+        ),
+        "ingested_at": base_time + timedelta(hours=25),
+        "source": "Financial Express",
+        "url": "https://example.com/new003"
+    }
+]
+
+
+# --------------------------------------------------
+# 6. CREATE SPARK DATAFRAME
+# --------------------------------------------------
+
+incoming_df = spark.createDataFrame(
+    incoming_articles
+)
+
+
+# --------------------------------------------------
+# 7. RUN SEMANTIC DEDUPLICATION
+# --------------------------------------------------
+
+try:
+
+    print("\n===================================")
+    print("STARTING SEMANTIC DEDUPLICATION TEST")
+    print("===================================")
+
+    unique_df, duplicate_df = (
+        deduplicate_news.semantic_deduplicate_news(
+            incoming_df
+        )
+    )
+
+    # --------------------------------------------------
+    # 8. DISPLAY UNIQUE ARTICLES
+    # --------------------------------------------------
+
+    print("\n========== UNIQUE ARTICLES ==========")
+
+    unique_df.select(
+        "article_id",
+        "headline",
+        "matched_tickers"
+    ).show(
+        truncate=False
+    )
+
+    # --------------------------------------------------
+    # 9. DISPLAY DUPLICATE ARTICLES
+    # --------------------------------------------------
+
+    print("\n========== DUPLICATE ARTICLES ==========")
+
+    duplicate_df.show(
+        truncate=False
+    )
+
+    # --------------------------------------------------
+    # 10. VERIFY RESULTS
+    # --------------------------------------------------
+
+    unique_count = unique_df.count()
+    duplicate_count = duplicate_df.count()
+
+    duplicate_ids = {
+        row["duplicate_article_id"]
+        for row in duplicate_df.collect()
+    }
+
+    print("\n========== TEST RESULTS ==========")
+
+    print("Unique articles:", unique_count)
+    print("Duplicate articles:", duplicate_count)
+    print("Duplicate IDs:", duplicate_ids)
+
+    assert unique_count == 2, (
+        f"Expected 2 unique articles, got {unique_count}"
+    )
+
+    assert duplicate_count == 1, (
+        f"Expected 1 duplicate, got {duplicate_count}"
+    )
+
+    assert "NEW001" in duplicate_ids, (
+        "NEW001 should be detected as a duplicate"
+    )
+
+    assert "NEW002" not in duplicate_ids, (
+        "NEW002 should remain unique"
+    )
+
+    assert "NEW003" not in duplicate_ids, (
+        "NEW003 should remain unique because it is outside 24 hours"
+    )
+
+    print("\nALL TESTS PASSED!")
+
+finally:
+
+    spark.stop()
+    temp_directory.cleanup()
